@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+    <title>Small Scale Kubernetes - Running Latency.at on a Budget</title>
+
+    <link rel="stylesheet" href="css/reveal.css">
+    <link rel="stylesheet" href="css/theme/black.css">
+
+    <!-- Theme used for syntax highlighting of code -->
+    <link rel="stylesheet" href="lib/css/zenburn.css">
+
+    <!-- Printing and PDF exports -->
+    <script>
+      var link = document.createElement( 'link' );
+      link.rel = 'stylesheet';
+      link.type = 'text/css';
+      link.href = window.location.search.match( /print-pdf/gi ) ? 'css/print/pdf.css' : 'css/print/paper.css';
+      document.getElementsByTagName( 'head' )[0].appendChild( link );
+    </script>
+  </head>
+  <body>
+    <div class="reveal">
+      <div class="slides">
+        <section data-markdown>
+          <section data-template>
+            # Small Scale Kubernetes
+            *Running Latency.at On A Budget*
+
+            Johannes 'fish' Ziemke
+
+            [@discordianfish](https://twitter.com/discordianfish)
+
+            [https://5pi.de](https://5pi.de)
+            
+            Note:
+            Hi. My name is..
+            I'll be talking about..
+            You can find me..
+          </section>
+        </section>
+        <section>
+          <section data-markdown>
+            <textarea data-template>
+              # Latency.at?
+              *Performance and Availability Metrics For Your Monitoring
+              System.*
+              [![demo](assets/demo.png)](https://demo.latency.at)
+
+              Note:
+              So what is..
+            </textarea>
+          </section>
+          <section data-markdown>
+            <textarea data-template>
+              # Latency.at
+              - Probes around the globe
+              - Latency/Availability metrics in Prometheus format
+              - Based on Prometheus' blackbox_exporter
+              - Open metrics format
+              - Per request billing
+              - Free Plan!
+              Note:
+              Free Plan, so sign up!
+            </textarea>
+          </section>
+          <section data-markdown>
+            <textarea data-template>
+              # Deployment?
+              - Small immutable, low cost, low maintenance
+              - Immutable VMs:
+                - Less indirection/abstraction
+                - Fewer spinning wheels
+                - Slower iteration
+              - Kubernetes:
+                - Way more complex
+                - Faster iteration
+                - Reusability
+                - Free GKE (Google Kubernetes Engine)
+
+              Note:
+              About a year ago I looked into various deployment options
+              ..reinventing loadbalancing etc
+              Decided to use GKE!
+            </textarea>
+          </section>
+        </section>
+        <section>
+          <section>
+            <h1>Architecture</h1>
+            <aside class="notes">Let's have a look at the logical architecture
+              I arrived at.</aside>
+          </section>
+          <section>
+            <img alt="infra" src="assets/infra.svg" style="background-color: white; width: 100%">
+            <aside class="notes">
+              Well actually, the read-replica doesn't exist and it's using the
+              API currently. But this is the current plan after a few iterations.
+              Counting is hard.
+              
+              - Frontend uses API for signup etc
+              - Customer monitoring system scrapes Probes w/ auth token
+              - Probes *will* validate auth token, log request to pub/sub
+              - booker recives pub/sub msgs, decrease account balance
+              - balancer resets account balance each month
+            </aside>
+          </section>
+          <section data-markdown>
+            <textarea data-template>
+              # Implementation
+              - React Frontend:
+                - S3, AWS CloudFront
+              - Controller:
+                - GKE, 2x n1-standard-1 (1 CPU, 3.75GB memory)
+                - Runs Postgres, Prometheus, API and auxiliary services
+              - But Probes?
+                - No cross region GKE support
+                - Cloud agnostic
+                - Fast iteration
+
+              Note:
+              Control plane, straight forward! No CI/autoscaling.
+              But Probes?
+            </textarea>
+          </section>
+          <section data-markdown>
+            <textarea data-template>
+              # Kubernetes on Kubernetes
+              Dedicated Kubernetes Master for Probes
+              - etcd with PersistentVolumeClaim
+              - kubeconfig passed to Probes via user-data
+              - No networking plugins, only host-networking
+
+              Note:
+              So I decide to run a dedicated kubernetes master for probes.
+              I leave the Xzibit meme picture to your imagination Yo Dawg!
+            </textarea>
+          </section>
+          <section data-markdown>
+            <textarea data-template>
+              # bootkube = ❤
+              
+              Generate Manifests and Keys:
+
+                  bootkube render --etcd-servers http://etcd-cluster-client:2379 \
+                    --api-servers https://k8s.int.latency.at:443 \
+                    --api-server-alt-names DNS=kube-apiserver \
+                    --api-server-alt-names DNS=k8s.int.latency.at \
+                    --asset-dir generated
+
+              - Using only controller, apiserver and scheduler manifests
+              - Modified namespace and removed node selectors, taints and
+                tolerations
+
+              Note:
+              I'm using bootkube to...
+            </textarea>
+          </section>
+          <section data-markdown>
+            <textarea data-template>
+              # Probes
+              - CoreOS, using kubelet wrapper
+              - Installed by Terraform
+              - Currently on DigitalOcean, more planned
+              - generated kubeconfig passed in as user-data
+
+              Note:
+              The probes themselves are running CoreOS (container linux)
+            </textarea>
+          </section>
+        </section>
+        <section>
+          <section>
+            <h1>Scaling Down</h1>
+            <aside class="notes">
+              But have to fit the control plane on two GKE instances?
+            </aside>
+          </section>
+          <section data-markdown>
+            <textarea data-template>
+              # Resource Limits
+              GKE sets default 100m CPU resource requests:
+
+                  $ kubectl describe limits limits
+                  Name:       limits
+                  Namespace:  default
+                  Type        Resource  Min  Max  Default Request  Default Limit  Max Limit/Request Ratio
+                  ----        --------  ---  ---  ---------------  -------------  -----------------------
+                  Container   cpu       -    -    100m            
+
+              &rarr; Set resource limits for all pods or decrease limit.
+
+              Note:
+              First you'd have to decrease the source limits.
+              Max of 10 pods/Node
+            </textarea>
+          </section>
+          <section data-markdown>
+            <textarea data-template>
+              ## Reliability without Redundancy
+              - Kubernetes Master and backing etcd are SPOF
+              - ...but Probes aren't depending on it
+              - Prometheus is SPOF
+              - ...but [Dead Man's Snitch](https://deadmanssnitch.com/)
+                monitored
+              - Database is SPOF (and running on k8s 😱)
+              - ...but Probes allow request when unreachable
+
+              Note:
+              Isn't enough...
+              As you might have noticed: k8s master and etcd..
+            </textarea>
+            Note:
+          </section>
+        </section>
+        <section>
+          <section>
+            <h1>Monitoring</h1>
+            Demo
+            <aside class="notes">
+              Our use of Prometheus isn't special, but since we're a Monitoring
+              company...
+
+              https://grafana.int.latency.at
+              - Main dashboard:
+                - Request Duration: Outgoing (quantiles from probes)
+                - Request Duration: Incoming (probes probing site)
+              - HTTP/Durations:
+                - Baseline metrics
+
+              https://prometheus.int.latency.at/alerts
+            </aside>
+          </section>
+        </section>
+        <section>
+          <section>
+            <h1>Lessons learned</h1>
+          </section>
+          <section>
+            <h2>Managed Kubernetes works well for small scale too!</h2>
+            <aside class="notes">
+              All kubernetes benefits
+              Never really had issues with the control plan
+              Would do it again
+            </aside>
+          </section>
+          <section>
+            <h2>If you can't afford redundancy, make sure to fail gracefully.</h2>
+            <aside class="notes">
+              While might be obvious: No need for redundancy everywhere
+            </aside>
+          </section>
+          <section>
+            <h2>Get paying customers before you build anything.</h2>
+            <aside class="notes">
+              Biggest mistake
+              Hard to do
+              But now not covering costs yet
+            </aside>
+          </section>
+        </section>
+      </div>
+    </div>
+    <script src="lib/js/head.min.js"></script>
+    <script src="js/reveal.js"></script>
+
+    <script>
+      // More info about config & dependencies:
+      // - https://github.com/hakimel/reveal.js#configuration
+      // - https://github.com/hakimel/reveal.js#dependencies
+      Reveal.initialize({
+        dependencies: [
+          { src: 'plugin/markdown/marked.js' },
+          { src: 'plugin/markdown/markdown.js' },
+          { src: 'plugin/notes/notes.js', async: true },
+          { src: 'plugin/highlight/highlight.js', async: true, callback: function() { hljs.initHighlightingOnLoad(); } }
+        ]
+      });
+    </script>
+  </body>
+</html>
